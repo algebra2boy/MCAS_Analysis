@@ -1,0 +1,507 @@
+library(tidyverse)
+library(rvest) # web scraping
+library(xml2) # parsing HTML
+library(ggplot2)
+library(MASS)
+library(plotly)
+
+# Load Dataset and pre-processing (Yongye)
+
+education <- read.csv("MA_Public_Schools_2017.csv")
+
+filtered_education <- 
+  education %>% 
+  
+  # filter out by number of enrollment
+  filter(TOTAL_Enrollment >= 800) %>% 
+  
+  # filter out only high school
+  filter(Grade == "09,10,11,12") %>% 
+  
+  # filter out school that has AP exams  
+  filter(AP_Test.Takers != "") %>% 
+  
+  # select columns that do not have na values in all row
+  select_if(~ !all(is.na(.))) %>% 
+  
+  # Remove columns that do not have any meaning to our investigation
+  #select(-District.Code, -PK_Enrollment, -K_Enrollment, -X1_Enrollment, -X2_Enrollment, -X3_Enrollment, -X4_Enrollment, -X5_Enrollment, -X6_Enrollment, -X7_Enrollment, -X8_Enrollment, -Fax, -Phone, -Function, -Address.2) %>% 
+  
+  # sort the name of town
+  arrange(Town)
+
+write.csv(filtered_education, "filter_education.csv")
+
+COL_NAMES <- colnames(filtered_education) # get all column names
+TOWN_NAMES <- filtered_education$Town # get all city names
+
+# Web Scraping (Yongye)
+
+# read and store the html file
+town_info <- readLines(paste(getwd(), "/wikipedia.html", sep = ""))
+
+# collapse into a single string so we can better extract the data out
+town_info_str <- paste(town_info, collapse = "")
+
+# make the pattern to extract the table
+wiki_table_pattern <- "<table class=\"wikitable sortable\">(.*)</table>"
+
+# Extract the table html using the pattern
+table_html <- str_match(town_info_str, wiki_table_pattern)[, 2]
+
+# re-parse the HTML content to the readable table string
+html <- read_html(table_html)
+
+# convert the HTML table string to R dataframe
+table <- html %>% html_table()
+
+# get the first table 
+table_data <- table[[1]]
+
+# get all name of columns to iterate over the column
+TABLE_COL_NAMES <- colnames(table_data)
+
+# iterate over each column
+for (i in 1: length(TABLE_COL_NAMES)) {
+  table_data[i] <- gsub("\\$", "", table_data[[TABLE_COL_NAMES[i]]])  # Remove dollar signs
+  table_data[i] <- gsub(",", "", table_data[[TABLE_COL_NAMES[i]]])  # Remove comma
+  table_data[i] <- gsub("\\+", "", table_data[[TABLE_COL_NAMES[i]]])  # Remove plus 
+}
+
+# More Web scraping (Yongye)
+
+
+count <- 0
+
+median_family_income <- c()
+households <- c()
+population <- c()
+missing_town <- c()
+
+# NOW iterate over each row in filtered_education and add
+# Median household income, Households, and Population
+for (i in 1 : nrow(filtered_education)) {
+  
+  # get one row from filtered education
+  school_row <- filtered_education[i, ]
+  
+  # all the town name
+  town_name <- school_row$Town
+  
+  # find the match row
+  match_table_data <- table_data %>% filter(Municipality == town_name)
+  
+  # increment the count if there is any result from the dataset
+  # extract the data (it is where magic happens)
+  if (nrow(match_table_data) > 0) {
+    
+    median_family_income <- c(median_family_income, (as.double(match_table_data$`Median family income`)))
+    
+    households <- c(households, as.double(match_table_data$Households))
+    
+    population <- c(population, as.double(match_table_data$Population))
+    count <- count + 1
+    
+  } else {
+    
+    median_family_income <- c(median_family_income, NA)
+    
+    households <- c(households, NA)
+    
+    population <- c(population, NA)
+    
+    # add missing town to the vector
+    missing_town <- c(missing_town, town_name)
+  }
+  
+}
+
+cat("Here are a list of towns that we could not find the median house income, population, and households:\n", missing_town, "\n")
+
+# Final: add scrap data to our filtered education dataset
+filtered_education <- 
+  filtered_education %>% 
+  mutate(median_family_income = median_family_income) %>% 
+  mutate(households = households) %>% 
+  mutate(population = population)
+
+
+# Relationship between median family incom and MCAS CPI Score (Yongye)
+
+ggplot(data = filtered_education, 
+       mapping = aes(
+         x = median_family_income, 
+         y = MCAS_10thGrade_English_CPI
+       )) + 
+  geom_point(na.rm = TRUE) + 
+  geom_smooth(method = "loess", color = "red") + 
+  labs(
+    x = "Median family income in dollar",
+    y = "10th grade MCAS English CPI Score",
+    title = "median family income vs MCAS English CPI Score"
+  ) + 
+  theme(plot.title = element_text(hjust = 0.5))
+ggsave("picture1.png")
+
+ggplot(data = filtered_education, 
+       mapping = aes(
+         x = median_family_income, 
+         y = MCAS_10thGrade_Math_CPI
+       )) + 
+  geom_point(na.rm = TRUE) + 
+  geom_smooth(method = "loess", color = "red") + 
+  labs(
+    x = "Median family income in dollar",
+    y = "10th grade MCAS Math CPI Score",
+    title = "median family income vs MCAS Math CPI Score"
+  ) + 
+  theme(plot.title = element_text(hjust = 0.5))
+ggsave("picture2.png")
+
+# Relationship between median family income and SAT Score
+
+
+filtered_education <- filtered_education %>% mutate(passAP = filtered_education$AP_Score.3 + filtered_education$AP_Score.4 + filtered_education$AP_Score.5, total = filtered_education$AP_Score.3 + filtered_education$AP_Score.4 + filtered_education$AP_Score.5 + filtered_education$AP_Score.2 + filtered_education$AP_Score.1, ratio = passAP / total)
+
+filtered_education %>% 
+  ggplot(mapping = aes(
+    x = median_family_income, 
+    y = ratio
+  )) + 
+  geom_point(na.rm = TRUE) + 
+  geom_smooth(method = "loess", color = "red") + 
+  labs(
+    x = "Median family income in dollar",
+    y = "ratio of passing AP exam to total student",
+    title = "median family income vs AP exam"
+  ) + 
+  theme(plot.title = element_text(hjust = 0.5))
+ggsave("picture3.png")
+
+#quick note, we might want percentage of students passing? -E
+
+filtered_education %>% 
+  ggplot(mapping = aes(
+    x = median_family_income, 
+    y = Average.SAT_Math)
+  ) + 
+  geom_point(na.rm = TRUE) + 
+  geom_smooth(method = "loess", color = "red") + 
+  labs(
+    x = "Median family income in dollar",
+    y = "Average SAT math score",
+    title = "Median family income vs SAT Math score"
+  ) + 
+  theme(plot.title = element_text(hjust = 0.5))
+ggsave("picture4.png")
+
+# Regression (Yongye)
+
+lm(formula = MCAS_10thGrade_English_CPI ~ median_family_income, data = filtered_education)
+
+coefficient1 <- cor.test(
+  filtered_education$median_family_income, 
+  filtered_education$MCAS_10thGrade_English_CPI)
+print(coefficient1)
+# p-value is 1.321e-10
+
+coefficient2 <- cor.test(
+  filtered_education$median_family_income, 
+  filtered_education$MCAS_10thGrade_Math_CPI)
+print(coefficient2)
+# p-value is 4.087e-14
+
+coefficient3 <- cor.test(
+  filtered_education$median_family_income, 
+  filtered_education$Average.SAT_Math)
+print(coefficient3)
+# p-value < 2.2e-16
+
+
+coefficient4 <- cor.test(
+  filtered_education$median_family_income, 
+  filtered_education$ratio)
+print(coefficient4)
+
+# Bootstrap (Elizabeth)
+
+
+N_bts <- 128  
+M <- 500 # size of bootstrap sample   
+regressions <- array(dim = c(M,8))   
+for (m in 1:M) {
+  idx <- sample(N_bts,replace=TRUE)
+  coeffs1 <- cor.test(filtered_education$median_family_income[idx], 
+                      filtered_education$MCAS_10thGrade_English_CPI[idx])
+  coeffs2 <- cor.test(filtered_education$median_family_income[idx], 
+                      filtered_education$MCAS_10thGrade_Math_CPI[idx])
+  coeffs3 <- cor.test(filtered_education$median_family_income[idx], 
+                      filtered_education$Average.SAT_Math[idx])
+  coeffs4 <- cor.test(filtered_education$median_family_income[idx], 
+                      filtered_education$ratio[idx])
+  #coeffs <- c(coeffs1$statistic, coeffs1$p.value, coeffs2$statistic, coeffs2$p.value, coeffs3$statistic, coeffs3$p.value, coeffs4$statistic, coeffs4$p.value)
+  coeffs <- c(coeffs1$estimate, coeffs1$p.value, coeffs2$estimate, coeffs2$p.value, coeffs3$estimate, coeffs3$p.value, coeffs4$estimate, coeffs4$p.value)
+  regressions[m,] <- coeffs
+}
+
+# mean(regressions[,1])
+# sd(regressions[,1])
+# hist(regressions[,1])
+
+colMeans(regressions)
+
+#ggplot(data = regressions) +
+#geom_histogram(mapping = aes(x=regressions[,1]))
+
+hist(regressions[,1], breaks = 50, main = "Bootstrapped English MCAS CPI", xlab = "MCAS 10th Grade English CPI" )
+hist(regressions[,3],breaks = 50,  main = "Bootstrapped Math MCAS CPI", xlab = "MCAS 10th Grade Math CPI" )
+hist(regressions[,5], breaks = 50, main = "Bootstrapped Math SAT", xlab = "Average Math SAT Score" )
+hist(regressions[,7], breaks = 50, main = "Bootstrapped AP Ratio", xlab = "Ratio of AP Exams passed to taken" )
+
+
+# Monte Carlo (Elizabeth)
+
+#correlation test: 
+
+# coefficient1 <- cor.test(
+#   filtered_education$median_family_income, 
+#   filtered_education$MCAS_10thGrade_English_CPI)
+# print(coefficient1)
+
+#default conf level = 0.95
+
+#SAT looks normal enough; MCAS is a percentage, probably model with beta
+
+mean(filtered_education$median_family_income, na.rm = TRUE)
+#125715.1
+sd(filtered_education$median_family_income, na.rm = TRUE)
+#49917.66
+#doesn't look normal, but probably truncated normal bc we're excluding the poorest schools
+
+mean(filtered_education$Average.SAT_Reading)
+#505.1875
+sd(filtered_education$Average.SAT_Reading)
+#57.98381
+mean(filtered_education$Average.SAT_Math)
+#519.3125
+sd(filtered_education$Average.SAT_Math)
+#59.18804
+
+#generate synthetic uncorrelated data:
+N <- 125
+fake_income <- rnorm(N, mean = 125700, sd = 50000)
+fake_SAT_Reading <- rnorm(N, mean = 505, sd = 58)
+
+cor.test(fake_income, fake_SAT_Reading)
+
+#generate synthetic correlated data:
+
+rho = 0.6
+
+fake_data = mvrnorm(N, mu = c(125.7, 505), Sigma = matrix(c(50^2, rho*50*58, rho*50*58, 58^2), nrow = 2))
+
+plot(fake_data[,1], fake_data[,2])
+#names(fake_data) <- c("Income", "SAT_Reading")
+
+fake_data_fn <- function(N = 125, rho = 0) {
+  fake_data = mvrnorm(N, mu = c(125.7, 505), Sigma = matrix(c(50^2, rho*50*58, rho*50*58, 58^2), nrow = 2))
+  return(fake_data)
+}
+
+fake_data_fn()
+
+cor_test_fn <- function(df, alpha = 0.05) {
+  cor_test_result <- cor.test(df[,1],df[,2], conf.level = 1 - alpha)
+  return(cor_test_result$p.value < alpha)
+}
+
+cor_test_fn(fake_data_fn())
+
+power_test_fn <- function(S = 500, N = 125, rho = 0, alpha = 0.05) {
+  dfs <- replicate(S, cor_test_fn(fake_data_fn(N, rho), alpha))
+  return(mean(dfs))
+}
+
+power_test_fn()
+
+
+#Power Study
+
+rho_vec <- seq(-1,1,0.1)
+
+power_vec <- lapply(rho_vec, power_test_fn, S = 500, N = 125, alpha = 0.05)
+
+plot(x = rho_vec, y = power_vec)
+
+
+
+# Scratchwork (Elizabeth)
+
+ggplot(data=filtered_education) +
+  geom_point(mapping = aes(x=Average.SAT_Math, y=X..MCAS_10thGrade_Math_P.A, size=TOTAL_Enrollment, color=X..Economically.Disadvantaged))
+
+ggplot(data=filtered_education) +
+  geom_point(mapping = aes(x=Average.SAT_Writing, y=X..MCAS_10thGrade_English_P.A, size=TOTAL_Enrollment, color=X..Economically.Disadvantaged))
+
+percentage_vals <- select(filtered_education, 
+                          #TOTAL_Enrollment, 
+                          X..Economically.Disadvantaged, Average.SAT_Reading, Average.SAT_Math,X..MCAS_10thGrade_Math_P.A, X..MCAS_10thGrade_English_P.A, median_family_income
+                          #, households, population
+) %>%
+  pairs()
+
+hist(filtered_education$X..Economically.Disadvantaged, breaks = 30)
+hist(filtered_education$Average.SAT_Reading)
+hist(filtered_education$Average.SAT_Math)
+hist(filtered_education$X..MCAS_10thGrade_Math_P.A, breaks = 30)
+hist(filtered_education$X..MCAS_10thGrade_English_P.A, breaks = 30)
+hist(filtered_education$median_family_income, breaks = 30)
+hist(filtered_education$MCAS_10thGrade_English_CPI, breaks = 30)
+hist(filtered_education$MCAS_10thGrade_Math_CPI, breaks = 30)
+
+g <- ggplot(data = filtered_education, 
+            mapping = aes(
+              x = log(median_family_income), 
+              y = MCAS_10thGrade_Math_CPI,
+              text = sprintf("School = ", School.Name)
+            )) + 
+  geom_point(na.rm = TRUE) + 
+  geom_smooth(method = "loess", color = "red") + 
+  geom_text(label=filtered_education$School.Name) + 
+  labs(
+    x = "Median family income in log-dollar",
+    y = "10th grade MCAS Math CPI Score",
+    title = "log median family income vs MCAS Math CPI Score"
+  ) + 
+  theme(plot.title = element_text(hjust = 0.5)) 
+
+g
+
+ggplot(data=filtered_education) +
+  geom_point(mapping = aes(x=Average.SAT_Math, y=MCAS_10thGrade_Math_CPI, size=TOTAL_Enrollment, color=median_family_income))
+
+mutate(filtered_education, passAP = filtered_education$AP_Score.3 + filtered_education$AP_Score.4 + filtered_education$AP_Score.5, passAPpct = passAP/TOTAL_Enrollment) %>%
+  
+  select(
+    #TOTAL_Enrollment, 
+    MCAS_10thGrade_Math_CPI, MCAS_10thGrade_English_CPI, passAP, passAPpct, Average.SAT_Math, median_family_income
+    #, households, population
+  ) %>%
+  pairs()
+
+# 
+
+# Maekala
+
+# read in tidied data
+education <- read.csv("filter_education.csv")
+
+# assigning schools into groups by graduation rate (assuming the goal of each school is a 100% graduation rate)
+
+bottom_25_percent <- subset(education, 
+                            education$X..Graduated <= quantile(education$X..Graduated, probs = 0.25))
+
+middle_50_percent <- subset(education,
+                            education$X..Graduated > quantile(education$X..Graduated, probs = 0.25) &
+                              X..Graduated <= quantile(education$X..Graduated, probs = 0.75))
+
+top_25_percent <- subset(education,
+                         education$X..Graduated > quantile(education$X..Graduated, probs = 0.75))
+
+
+
+# explore the top correlated columns within each subgroup
+
+# bottom quartile
+bottom_25_percent <- bottom_25_percent[sapply(bottom_25_percent, is.numeric)]
+
+b_correlation_matrix <- cor(bottom_25_percent)
+b_highly_correlated <- which(upper.tri(b_correlation_matrix, diag = TRUE) & b_correlation_matrix > 0.8, arr.ind = TRUE)
+
+b_most_correlated <- data.frame(Column1 = rownames(b_correlation_matrix)[b_highly_correlated[, 1]],
+                                Column2 = colnames(b_correlation_matrix)[b_highly_correlated[, 2]],
+                                Correlation = b_correlation_matrix[b_highly_correlated])
+
+b_most_correlated <- b_most_correlated[b_most_correlated$Column1 != b_most_correlated$Column2, ]
+
+b_top_50 <- b_most_correlated[order(-b_most_correlated$Correlation), ][1:50, ]
+
+
+# middle 50 percent
+middle_50_percent <- middle_50_percent[sapply(middle_50_percent, is.numeric)]
+
+m_correlation_matrix <- cor(middle_50_percent)
+m_highly_correlated <- which(upper.tri(m_correlation_matrix, diag = TRUE) & m_correlation_matrix > 0.8, arr.ind = TRUE)
+
+m_most_correlated <- data.frame(Column1 = rownames(m_correlation_matrix)[m_highly_correlated[, 1]],
+                                Column2 = colnames(m_correlation_matrix)[m_highly_correlated[, 2]],
+                                Correlation = m_correlation_matrix[m_highly_correlated])
+
+m_most_correlated <- m_most_correlated[m_most_correlated$Column1 != m_most_correlated$Column2, ]
+
+
+m_top_50 <- m_most_correlated[order(-m_most_correlated$Correlation), ][1:50, ]
+
+# top quartile
+top_25_percent <- top_25_percent[sapply(top_25_percent, is.numeric)]
+
+t_correlation_matrix <- cor(top_25_percent)
+t_highly_correlated <- which(upper.tri(t_correlation_matrix, diag = TRUE) & t_correlation_matrix > 0.8, arr.ind = TRUE)
+
+t_most_correlated <- data.frame(Column1 = rownames(t_correlation_matrix)[t_highly_correlated[, 1]],
+                                Column2 = colnames(t_correlation_matrix)[t_highly_correlated[, 2]],
+                                Correlation = t_correlation_matrix[t_highly_correlated])
+
+t_most_correlated <- t_most_correlated[t_most_correlated$Column1 != t_most_correlated$Column2, ]
+
+
+t_top_50 <- t_most_correlated[order(-t_most_correlated$Correlation), ][1:50, ]
+
+# some of the most interesting correlations
+print("The bottom quartile of schools had a large correlation between high needs students and economically disadvantaged students. As a matter of fact, it is only the top quartile that doesn't see as large of a correlation between high needs students and economically disadvantaged students.")
+
+print("Another interesting note is that the bottom and top quartile both share strong correlations between their reading/writing SAT scores and their math SAT scores, whereas the middle 50% only sees a high correlation between the reading and writing scores.")
+
+#plot the histogram of amount of white vs. nonwhite schools 
+white <- education %>%  subset(X..White >= 50)
+nonwhite <- education %>% subset(X..White < 50)
+
+whitehist <- ggplot(education, group = fill) + 
+  geom_histogram(data = white, aes(x = X..White, fill = "White Schools" ), color = "black", position = "dodge", alpha = 0.5, bins = 30) +
+  geom_histogram(data = nonwhite, aes(x = X..White, fill = "Non-White Schools"), color = "black", position = "dodge", alpha = 0.5, bins = 30) +
+  labs(title = "Proportion of White Students in Schools",
+       x = "Proportion of White Students",
+       y = "Frequency") +
+  scale_fill_manual(values = c("White Schools" = "darkgreen", "Non-White Schools" = "gold"),
+                    labels = c("Non-White Schools", "White Schools")) +
+  theme_minimal()
+
+ggplotly(whitehist)
+
+# Visualizing the relationship between columns of interest
+bottom_plot <- ggplot(bottom_25_percent, 
+                      aes(y = X..Graduated, x = X..High.Needs)) +
+  geom_point(aes(color = X..Economically.Disadvantaged, size = bottom_25_percent$Average.Class.Size)) +
+  labs(y = "Graduation Rate", x = "High Needs", color = "Economically Disadvantaged", size = "Class Size") +
+  ggtitle("Graduation Rate related to High Needs, Economically Disadvantaged, and Class Size") +
+  theme(plot.title = element_text(size=18)) +
+  scale_color_gradient(low = "orange", high = "purple") +
+  theme(plot.title = element_text(size = 4)) +
+  scale_size_continuous(range = c(2, 8)) + theme_minimal()
+
+bottom_plot_interactive <- ggplotly(bottom_plot)
+bottom_plot_interactive
+
+# Visualizing the relationship between columns of interest
+top_plot <- 
+  ggplot(top_25_percent, 
+         aes(x = X..High.Needs, y = X..Graduated)) +
+  geom_point( aes(size = Average.Class.Size, color = X..Economically.Disadvantaged)) +
+  ggtitle("Graduation Rate related to High Needs, Economically Disadvantaged, and Class Size") +
+  labs(x = "High Needs", y = "Graduation Rate", color = "Economically Disadvantaged", size = "Class Size") +
+  scale_size_continuous(range = c(1, 8)) +
+  scale_color_gradient(low = "orange", high = "purple") +
+  theme_minimal()
+
+top_plot_interactive <- ggplotly(top_plot)
+top_plot_interactive
